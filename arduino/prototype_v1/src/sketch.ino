@@ -31,7 +31,7 @@
 #include <DallasTemperature.h>
 
 //To save PID tunings and temperatures
-#include <EEPROM.h>
+//#include <EEPROM.h>
 
 #define LED_RED 3
 #define LED_YELLOW A1
@@ -81,6 +81,10 @@ int lastEncoderPos = 0;
 byte switchState = 0;
 unsigned long switchStartTime;
 
+unsigned long timerSetTime = 0;
+
+boolean timerIsOn = false;
+
 boolean A_set = false, B_set = false;
 
 boolean isRunning = false;
@@ -91,7 +95,7 @@ LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 //Set up the PID with the params
 PID tempPID(&currentTemp, &PIDOutput, &tempSet, Kp, Ki, Kd, DIRECT);
 
-PID_ATune aTune(&currentTemp, &PIDOutput);
+//PID_ATune aTune(&currentTemp, &PIDOutput);
 
 
 //Temperature sensor stuff
@@ -100,12 +104,38 @@ DallasTemperature tempSense(&oneWire);
 DeviceAddress sensorAddress;
 
 
-enum operatingState {OFF=0, RUN, TIMER, AUTOTUNE, TUNE};
+enum operatingState {OFF=0, RUN, TIMER_MENU, TIMER_SET, AUTOTUNE, DO_AUTOTUNE, TUNE_MENU, TUNE_KP, TUNE_KI, TUNE_KD};
 operatingState currentState = OFF, lastState = OFF;
+
+
+byte arrow_left[8] = {
+    B00011,
+    B00111,
+    B01111,
+    B11111,
+    B01111,
+    B00111,
+    B00011,
+};
+
+byte arrow_right[8] = {
+    B11000,
+    B11100,
+    B11110,
+    B11111,
+    B11110,
+    B11100,
+    B11000,
+};
+
+
+
 
 
 void setup()
 {
+    lcd.createChar(0, arrow_left);
+    lcd.createChar(1, arrow_right);
     lcd.begin(16,2);
 
     //Initialise the LED pins
@@ -134,21 +164,21 @@ void setup()
     //Get the sensor's address
     if (!tempSense.getAddress(sensorAddress, 0))
     {
-        lcd.setCursor(0,0);
-        lcd.print(F("NO TEMP SENSOR!"));
-        lcd.setCursor(0,1);
-        lcd.print(F("PLUG IN + REBOOT"));
-        while (1)
-        {
-            digitalWrite(LED_RED, HIGH);
-            digitalWrite(LED_GREEN, HIGH);
-            digitalWrite(LED_YELLOW, HIGH);
-            delay(500);
-            digitalWrite(LED_RED, LOW);
-            digitalWrite(LED_GREEN, LOW);
-            digitalWrite(LED_YELLOW, LOW);
-            delay(500);
-        }
+        /*        lcd.setCursor(0,0);
+                  lcd.print(F("NO TEMP SENSOR!"));
+                  lcd.setCursor(0,1);
+                  lcd.print(F("PLUG IN + REBOOT"));
+                  while (1)
+                  {
+                  digitalWrite(LED_RED, HIGH);
+                  digitalWrite(LED_GREEN, HIGH);
+                  digitalWrite(LED_YELLOW, HIGH);
+                  delay(500);
+                  digitalWrite(LED_RED, LOW);
+                  digitalWrite(LED_GREEN, LOW);
+                  digitalWrite(LED_YELLOW, LOW);
+                  delay(500);
+                  }*/
     }
 
     tempSense.setResolution(sensorAddress, 12);
@@ -222,14 +252,26 @@ void loop()
         case RUN:
             Run();
             break;
-        case TIMER:
+        case TIMER_MENU:
             Timer();
+            break;
+        case TIMER_SET:
+            Timer_Set();
             break;
         case AUTOTUNE:
             Autotune();
             break;
-        case TUNE:
+        case TUNE_MENU:
             Tune();
+            break;
+        case TUNE_KI:
+            Tune_Ki();
+            break;
+        case TUNE_KP:
+            Tune_Kp();
+            break;
+        case TUNE_KD:
+            Tune_Kd();
             break;
     }
 }
@@ -275,10 +317,10 @@ void doControl()
 
     if (tuning)
     {
-        if (aTune.Runtime())
-        {
-            finishAutoTune();
-        }
+        /*if (aTune.Runtime())
+          {
+          finishAutoTune();
+          }*/
     }
     else
     {
@@ -299,16 +341,17 @@ void Off()
     //Save the state so we can return to the correct one when in the menus
     isRunning = false;
     tempPID.SetMode(MANUAL);
+    PIDOutput = 0;
 
     digitalWrite(SSR, LOW);
 
 
-    
+
     lcd.setCursor(0,0);
     lcd.print(F("SET:      "));
     lcd.setCursor(5,0);
     lcd.print(tempSet,1);
-    
+
     lcd.setCursor(13,0);
     lcd.print(F("OFF"));
 
@@ -349,7 +392,7 @@ void Off()
     else if (switchState == 2)
     {
         //Long press. Go to config menu i.e timer
-        currentState = TIMER;
+        currentState = TIMER_MENU;
         switchState = 0;
     }
 
@@ -388,7 +431,7 @@ void Run()
         lcd.setCursor(12,1);
         lcd.print(F("   "));
         lcd.setCursor(12,1);
-        lcd.print(pct/10);
+        lcd.print(int(pct/10));
         lcd.print("%");
 
 
@@ -398,7 +441,7 @@ void Run()
     //Something happened. Check what and change state
     if (lastEncoderPos != encoderPos)
     {
-        //Temperature was changed, stay in run state and get delta
+        //Temperature was changed, modify setpoint accordingly
         tempSet += ((encoderPos - lastEncoderPos)/2.0);
         lastEncoderPos = encoderPos;
         //TODO: Save the new set temp to EEPROM
@@ -412,7 +455,7 @@ void Run()
     else if (switchState == 2)
     {
         //Long press. Go to config menu i.e timer
-        currentState = TIMER;
+        currentState = TIMER_MENU;
         switchState = 0;
     }
 
@@ -421,21 +464,295 @@ void Run()
 }
 void Timer()
 {
-    lcd.setCursor(5,0);
-    lcd.print(F("TIMER"));
-    lcd.setCursor(6,1);
-    lcd.print(F("OFF"));
+    unsigned long timeRemaining;
+    while(checkInputs() == 0)
+    {
+        //Print the arrows
+        lcd.setCursor(0,0);
+        lcd.write(byte(0));
+        lcd.setCursor(15,0);
+        lcd.write(byte(1));
+        lcd.setCursor(5,0);
+
+        lcd.print(F("TIMER"));
+
+        if (timerIsOn)
+        {
+            //Get the remaining time in minutes
+            timeRemaining = (millis() - timerSetTime)/60000;
+            lcd.setCursor(3,1);
+            lcd.print(F("ON: "));
+            lcd.print(int(timeRemaining/60));
+            lcd.print(":");
+            lcd.print(timeRemaining % 60);
+        }
+        else
+        {
+            lcd.setCursor(5,1);
+            lcd.print(F("OFF"));
+        }
+
+        delay(100);
+    }
 
 
+    if (switchState != 0)
+    {
+        //Short press. Go to set timer.
+        currentState = TIMER_SET;
+        switchState = 0;
+    }
+
+    if (lastEncoderPos != encoderPos)
+    {
+        if (encoderPos > lastEncoderPos)
+            //Move right
+            currentState = AUTOTUNE;
+        else
+            //Move left
+            currentState = TUNE_MENU;
+
+        lastEncoderPos = encoderPos;
+    }
+
+}
+
+void Timer_Set()
+{
+
+    while(checkInputs() == 0)
+    {
+        //Print the arrows
+        lcd.setCursor(0,0);
+        lcd.write(byte(0));
+        lcd.setCursor(15,0);
+        lcd.write(byte(1));
+        lcd.setCursor(5,0);
+
+        lcd.setCursor(7,0);
+        if (timerIsOn)
+            lcd.print(F("ON"));
+        else
+            lcd.print(F("OFF"));
+
+        delay(100);
+    }
+
+    if (lastEncoderPos != encoderPos)
+    {
+        timerIsOn = !timerIsOn;
+        lastEncoderPos = encoderPos;
+    }
+
+    if (switchState != 0)
+    {
+        switchState = 0;
+
+        lcd.clear();
+
+        if (timerIsOn)
+        {
+            while(currentState == TIMER_SET)
+            {
+                lcd.setCursor(0,0);
+                lcd.print(F("Time: "));
+
+                //Work out time in 00:00 format
+
+                lcd.print(int(timerSetTime/3600000));
+                lcd.print(":");
+                lcd.print((timerSetTime/60000) % 60);
+                lcd.print("    ");
+                delay(100);
+
+                if (switchState != 0)
+                {
+                    switchState = 0;
+                    //Change state
+                    if (isRunning)
+                        currentState = RUN;
+                    else
+                        currentState = OFF;
+                }
+
+                if (lastEncoderPos != encoderPos)
+                {
+                    timerSetTime += ((encoderPos - lastEncoderPos)*60000);
+                    lastEncoderPos = encoderPos;
+                }
+            }
+        }
+        else 
+        {
+            if (isRunning)
+                currentState = RUN;
+            else
+                currentState = OFF;
+        }
+
+
+    }
 }
 
 void Autotune()
 {
 
+    while(checkInputs() == 0)
+    {
+        //Print the arrows
+        lcd.setCursor(0,0);
+        lcd.write(byte(0));
+        lcd.setCursor(15,0);
+        lcd.write(byte(1));
+
+        lcd.setCursor(4,0);
+        lcd.print(F("AUTOTUNE!"));
+        delay(100);
+    }
+
+    if (switchState != 0);
+    {
+        currentState = DO_AUTOTUNE;
+        switchState = 0;
+    }
+
+    if (lastEncoderPos != encoderPos)
+    {
+        if (encoderPos > lastEncoderPos)
+            //Move right
+            currentState = TUNE_MENU;
+        else
+            //Move left
+            currentState = TIMER_MENU;
+
+        lastEncoderPos = encoderPos;
+    }
 }
+
+void Do_Autotune()
+{
+    currentState = OFF;
+}
+
 
 void Tune()
 {
+
+    while(checkInputs() == 0)
+    {
+        //Print the arrows
+        lcd.setCursor(0,0);
+        lcd.write(byte(0));
+        lcd.setCursor(15,0);
+        lcd.write(byte(1));
+
+        lcd.setCursor(3,0);
+        lcd.print(F("MANUAL TUNE"));
+        delay(100);
+    }
+
+    if (switchState != 0)
+    {
+        //Short press. Go to Kp
+        currentState = TUNE_KP;
+        switchState = 0;
+    }
+
+    if (lastEncoderPos != encoderPos)
+    {
+        if (encoderPos > lastEncoderPos)
+            //Move right
+            currentState = TIMER_MENU;
+        else
+            //Move left
+            currentState = AUTOTUNE;
+
+        lastEncoderPos = encoderPos;
+    }
+
+}
+
+void Tune_Kp()
+{
+
+    while(checkInputs() == 0)
+    {
+        lcd.setCursor(0,0);
+        lcd.print(F("Kp:       "));
+        lcd.print(Kp);
+
+        delay(100);
+    }
+    //Something happened. check what and change state
+    if (lastEncoderPos != encoderPos)
+    {
+        //Kp was changed, modify setpoint accordingly
+        Kp += (encoderPos - lastEncoderPos);
+        lastEncoderPos = encoderPos;
+    }
+    if (switchState != 0)
+    {
+        //TODO: save kp
+        //Short press. go to off state
+        currentState = TUNE_KI;
+        switchState = 0;
+    }
+}
+
+void Tune_Ki()
+{
+    while(checkInputs() == 0)
+    {
+        lcd.setCursor(0,0);
+        lcd.print(F("Ki:       "));
+        lcd.print(Ki);
+
+        delay(100);
+    }
+    //Something happened. Check what and change state
+    if (lastEncoderPos != encoderPos)
+    {
+        //Kp was changed, modify setpoint accordingly
+        Ki += (encoderPos - lastEncoderPos)/100.0;
+        lastEncoderPos = encoderPos;
+    }
+    if (switchState != 0)
+    {
+        //TODO: Save Kp
+        //Short press. Go to Kd
+        currentState = TUNE_KD;
+        switchState = 0;
+    }
+
+}
+
+void Tune_Kd()
+{
+    while(checkInputs() == 0)
+    {
+        lcd.setCursor(0,0);
+        lcd.print(F("Kd:       "));
+        lcd.print(Kd);
+
+        delay(100);
+    }
+    //Something happened. Check what and change state
+    if (lastEncoderPos != encoderPos)
+    {
+        //Kp was changed, modify setpoint accordingly
+        Kd += (encoderPos - lastEncoderPos)/100.0;
+        lastEncoderPos = encoderPos;
+    }
+    if (switchState != 0)
+    {
+        //TODO: Save Kp
+        //Short press. Go to previous state
+        if (isRunning)
+            currentState = RUN;
+        else
+            currentState = OFF;
+        switchState = 0;
+    }
 
 }
 
