@@ -97,6 +97,11 @@ boolean A_set = false, B_set = false;
 
 boolean isRunning = false;
 
+boolean warming = false;
+
+//turn the PID on warmUpDelta degrees below the setpoint.
+int warmUpDelta = 10;
+
 //Initialise library classes
 LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 
@@ -357,6 +362,12 @@ void doControl()
             tuning = 0;
         }
     }
+    else if (warming)
+    {
+        //If we're in the warm up stage then don't compute
+        //Just turn on the heater.
+        digitalWrite(SSR, HIGH);
+    }
     else
     {
         tempPID.Compute();
@@ -419,9 +430,7 @@ void Off()
         currentState = RUN;
         switchState = 0;
 
-        //Set up the PID before changing state
-        tempPID.SetMode(AUTOMATIC);
-        windowStartTime = millis();
+
 
     }
     else if (switchState == 2)
@@ -436,8 +445,24 @@ void Off()
 void Run()
 {
     isRunning = true;
+    
+    if (currentTemp < (tempSet - warmUpDelta))
+    {
+        warming = 1;
 
+        //Turn off the PID
+        tempPID.SetMode(MANUAL);
+    }
+    else
+    {
+        warming = 0;
+        tempPID.SetMode(AUTOMATIC);
+        windowStartTime = millis();
 
+    }
+    //Set up the PID
+
+   
     tempPID.SetTunings(Kp,Ki,Kd);
 
     lcd.setCursor(0,0);
@@ -453,6 +478,18 @@ void Run()
 
     while(checkInputs() == 0)
     {
+        //If warm up is on and we're above the setpoint - delta, then turn the
+        //PID on
+        if ((warming == 1) && (currentTemp > (tempSet - warmUpDelta)))
+        {
+            warming = 0;
+
+            //Disable the PID
+            tempPID.SetMode(AUTOMATIC);
+            windowStartTime = millis();
+            
+        }
+
         doControl();
 
         //Print the current Temperature
