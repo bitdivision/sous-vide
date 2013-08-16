@@ -31,7 +31,9 @@
 #include <DallasTemperature.h>
 
 //To save PID tunings and temperatures
-//#include <EEPROM.h>
+#include <EEPROM.h>
+
+
 
 #define LED_RED 3
 #define LED_YELLOW A1
@@ -53,6 +55,11 @@
 
 #define SSR A2
 #define DS_TEMP A3
+
+const int SpAddress = 0;
+const int KpAddress = 8;
+const int KiAddress = 16;
+const int KdAddress = 24;
 
 
 double tempSet, currentTemp, PIDOutput;
@@ -82,6 +89,7 @@ byte switchState = 0;
 unsigned long switchStartTime;
 
 unsigned long timerSetTime = 0;
+unsigned long timerEndTime = 0;
 
 boolean timerIsOn = false;
 
@@ -95,7 +103,7 @@ LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 //Set up the PID with the params
 PID tempPID(&currentTemp, &PIDOutput, &tempSet, Kp, Ki, Kd, DIRECT);
 
-//PID_ATune aTune(&currentTemp, &PIDOutput);
+PID_ATune aTune(&currentTemp, &PIDOutput);
 
 
 //Temperature sensor stuff
@@ -164,21 +172,21 @@ void setup()
     //Get the sensor's address
     if (!tempSense.getAddress(sensorAddress, 0))
     {
-        /*        lcd.setCursor(0,0);
-                  lcd.print(F("NO TEMP SENSOR!"));
-                  lcd.setCursor(0,1);
-                  lcd.print(F("PLUG IN + REBOOT"));
-                  while (1)
-                  {
-                  digitalWrite(LED_RED, HIGH);
-                  digitalWrite(LED_GREEN, HIGH);
-                  digitalWrite(LED_YELLOW, HIGH);
-                  delay(500);
-                  digitalWrite(LED_RED, LOW);
-                  digitalWrite(LED_GREEN, LOW);
-                  digitalWrite(LED_YELLOW, LOW);
-                  delay(500);
-                  }*/
+        lcd.setCursor(0,0);
+        lcd.print(F("NO TEMP SENSOR!"));
+        lcd.setCursor(0,1);
+        lcd.print(F("PLUG IN + REBOOT"));
+        while (1)
+        {
+            digitalWrite(LED_RED, HIGH);
+            digitalWrite(LED_GREEN, HIGH);
+            digitalWrite(LED_YELLOW, HIGH);
+            delay(500);
+            digitalWrite(LED_RED, LOW);
+            digitalWrite(LED_GREEN, LOW);
+            digitalWrite(LED_YELLOW, LOW);
+            delay(500);
+        }
     }
 
     tempSense.setResolution(sensorAddress, 12);
@@ -214,7 +222,7 @@ void setup()
     //Get the current Temperature to start off with
     currentTemp = tempSense.getTempC(sensorAddress);
 
-    LoadPIDParams();
+    LoadParameters();
     tempPID.SetTunings(Kp, Ki, Kd);
 
     tempPID.SetSampleTime(1000);
@@ -260,6 +268,9 @@ void loop()
             break;
         case AUTOTUNE:
             Autotune();
+            break;
+        case DO_AUTOTUNE:
+            Do_Autotune();
             break;
         case TUNE_MENU:
             Tune();
@@ -309,18 +320,42 @@ void displayTemps(byte inputState)
 
 void doControl()
 {
-    if (tempSense.isConversionAvailable(sensorAddress))
+    if (tempSense.isConnected(sensorAddress))
     {
+
         currentTemp = tempSense.getTempC(sensorAddress);
         tempSense.requestTemperaturesByAddress(sensorAddress);
-    }
 
+    }
+    else
+    {
+        //Temperature sensor has probably been disconnected
+        //Turn off the PID and make sure the SSR is off
+        tempPID.SetMode(MANUAL);
+        digitalWrite(SSR, LOW);
+
+        lcd.setCursor(5,1);
+        lcd.print(F("##"));
+
+
+        while(!tempSense.isConnected(sensorAddress))
+        {
+
+        }
+
+        //Sensor is working again so reenable
+        tempPID.SetMode(AUTOMATIC);
+        windowStartTime = millis();
+
+
+    }
     if (tuning)
     {
-        /*if (aTune.Runtime())
-          {
-          finishAutoTune();
-          }*/
+        if (aTune.Runtime())
+        {
+            FinishAutoTune();
+            tuning = 0;
+        }
     }
     else
     {
@@ -329,10 +364,6 @@ void doControl()
     onTime = PIDOutput;
 }
 
-void finishAutoTune()
-{
-
-}
 
 
 
@@ -345,6 +376,10 @@ void Off()
 
     digitalWrite(SSR, LOW);
 
+    //Make sure the LEDs are off
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_GREEN, LOW);
 
 
     lcd.setCursor(0,0);
@@ -429,12 +464,45 @@ void Run()
         //Print the duty cycle of the heater
         float pct = map(PIDOutput, 0, windowSize, 0, 1000);
         lcd.setCursor(12,1);
-        lcd.print(F("   "));
+        lcd.print(F("     "));
         lcd.setCursor(12,1);
         lcd.print(int(pct/10));
-        lcd.print("%");
+        lcd.print(F("%"));
+
+        if (timerIsOn && (timerSetTime != 0))
+        {
+            if (millis() > timerEndTime)
+            {
+                currentState = OFF;
+                timerEndTime = 0;
+                timerIsOn = 0;
+                break;
+            }
+        }
 
 
+
+        //Check the temperature and set the LEDs accordingly
+        if (abs(currentTemp - tempSet) < 0.5)
+        {
+            digitalWrite(LED_GREEN, HIGH);
+            digitalWrite(LED_RED, LOW);
+            digitalWrite(LED_YELLOW, LOW);
+        }
+        else if (abs(currentTemp - tempSet) < 5)
+        {
+            digitalWrite(LED_GREEN, LOW);
+            digitalWrite(LED_RED, LOW);
+            digitalWrite(LED_YELLOW, HIGH);
+        }
+        else
+        {
+            digitalWrite(LED_GREEN, LOW);
+            digitalWrite(LED_RED, HIGH);
+            digitalWrite(LED_YELLOW, LOW);
+        }
+
+        delay(50);
 
     }
 
@@ -444,7 +512,6 @@ void Run()
         //Temperature was changed, modify setpoint accordingly
         tempSet += ((encoderPos - lastEncoderPos)/2.0);
         lastEncoderPos = encoderPos;
-        //TODO: Save the new set temp to EEPROM
     }
     if (switchState == 1)
     {
@@ -458,6 +525,7 @@ void Run()
         currentState = TIMER_MENU;
         switchState = 0;
     }
+
 
 
 
@@ -541,6 +609,8 @@ void Timer_Set()
     if (lastEncoderPos != encoderPos)
     {
         timerIsOn = !timerIsOn;
+        if (!timerIsOn)
+            timerEndTime = 0;
         lastEncoderPos = encoderPos;
     }
 
@@ -568,6 +638,9 @@ void Timer_Set()
                 if (switchState != 0)
                 {
                     switchState = 0;
+
+                    timerEndTime = millis()+timerSetTime;
+
                     //Change state
                     if (isRunning)
                         currentState = RUN;
@@ -631,8 +704,53 @@ void Autotune()
 
 void Do_Autotune()
 {
-    currentState = OFF;
+
+    tuning = 1;
+    lcd.clear();
+    delay(1000);
+    digitalWrite(LED_RED,HIGH);
+    lcd.setCursor(5,0);
+    lcd.print(F("TUNING"));
+    delay(100);
+    ATuneModeRemember = tempPID.GetMode();
+
+    aTune.SetNoiseBand(aTuneNoise);
+    aTune.SetOutputStep(aTuneStep);
+    aTune.SetLookbackSec((int)aTuneLookBack);
+
+    while(tuning)
+    {
+
+        doControl();
+
+
+        lcd.setCursor(6,1);
+        lcd.print(currentTemp);
+
+
+    }
+
 }
+
+void FinishAutoTune()
+{
+    Kp = aTune.GetKp();
+    Ki = aTune.GetKi();
+    Kd = aTune.GetKd();
+
+    tempPID.SetTunings(Kp,Ki,Kd);
+    tempPID.SetMode(ATuneModeRemember);
+
+    SaveParameters();
+
+    tuning = 0;
+
+    if (isRunning)
+        currentState = RUN;
+    else
+        currentState = OFF;
+}
+
 
 
 void Tune()
@@ -696,6 +814,7 @@ void Tune_Kp()
         //Short press. go to off state
         currentState = TUNE_KI;
         switchState = 0;
+        SaveParameters();
     }
 }
 
@@ -722,6 +841,7 @@ void Tune_Ki()
         //Short press. Go to Kd
         currentState = TUNE_KD;
         switchState = 0;
+        SaveParameters();
     }
 
 }
@@ -752,6 +872,7 @@ void Tune_Kd()
         else
             currentState = OFF;
         switchState = 0;
+        SaveParameters();
     }
 
 }
@@ -839,4 +960,87 @@ void LoadPIDParams()
     Kp = 1300;
     Ki = 1;
     Kd = 0.1;
+}
+
+
+
+
+// ************************************************
+// Save any parameter changes to EEPROM
+// ************************************************
+void SaveParameters()
+{
+    if (tempSet != EEPROM_readDouble(SpAddress))
+    {
+        EEPROM_writeDouble(SpAddress, tempSet);
+    }
+    if (Kp != EEPROM_readDouble(KpAddress))
+    {
+        EEPROM_writeDouble(KpAddress, Kp);
+    }
+    if (Ki != EEPROM_readDouble(KiAddress))
+    {
+        EEPROM_writeDouble(KiAddress, Ki);
+    }
+    if (Kd != EEPROM_readDouble(KdAddress))
+    {
+        EEPROM_writeDouble(KdAddress, Kd);
+    }
+}
+
+// ************************************************
+// Load parameters from EEPROM
+// ************************************************
+void LoadParameters()
+{
+    // Load from EEPROM
+    tempSet = EEPROM_readDouble(SpAddress);
+    Kp = EEPROM_readDouble(KpAddress);
+    Ki = EEPROM_readDouble(KiAddress);
+    Kd = EEPROM_readDouble(KdAddress);
+
+    // Use defaults if EEPROM values are invalid
+    if (isnan(tempSet))
+    {
+        tempSet = 60;
+    }
+    if (isnan(Kp))
+    {
+        Kp = 850;
+    }
+    if (isnan(Ki))
+    {
+        Ki = 0.5;
+    }
+    if (isnan(Kd))
+    {
+        Kd = 0.1;
+    }  
+}
+
+
+// ************************************************
+// Write floating point values to EEPROM
+// ************************************************
+void EEPROM_writeDouble(int address, double value)
+{
+    byte* p = (byte*)(void*)&value;
+    for (int i = 0; i < sizeof(value); i++)
+    {
+        EEPROM.write(address++, *p++);
+    }
+}
+
+// ************************************************
+// Read floating point values from EEPROM
+// ************************************************
+double EEPROM_readDouble(int address)
+{
+    double value = 0.0;
+    byte* p = (byte*)(void*)&value;
+    for (int i = 0; i < sizeof(value); i++)
+    {
+        *p++ = EEPROM.read(address++);
+    }
+    return value;
 }
