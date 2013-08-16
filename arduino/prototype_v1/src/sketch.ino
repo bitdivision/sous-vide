@@ -366,7 +366,7 @@ void doControl()
     {
         //If we're in the warm up stage then don't compute
         //Just turn on the heater.
-        digitalWrite(SSR, HIGH);
+        PIDOutput = windowSize;
     }
     else
     {
@@ -456,6 +456,7 @@ void Run()
     else
     {
         warming = 0;
+        PIDOutput = 0;
         tempPID.SetMode(AUTOMATIC);
         windowStartTime = millis();
 
