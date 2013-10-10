@@ -445,25 +445,38 @@ void Off()
 void Run()
 {
     isRunning = true;
-    
-    if (currentTemp < (tempSet - warmUpDelta))
-    {
-        warming = 1;
 
-        //Turn off the PID
-        tempPID.SetMode(MANUAL);
+    if (warming)
+    {
+        if (currentTemp >= (tempSet - warmUpDelta))
+        {
+            warming = 0;
+            PIDOutput = 0;
+            tempPID.SetMode(AUTOMATIC);
+            windowStartTime = millis();
+        }
     }
     else
     {
-        warming = 0;
-        PIDOutput = 0;
-        tempPID.SetMode(AUTOMATIC);
-        windowStartTime = millis();
-
+        //Warming is OFF
+        if (currentTemp < (tempSet - warmUpDelta))
+        {
+            warming = 1;
+            tempPID.SetMode(MANUAL);
+        }
+        else
+        {
+            if (tempPID.GetMode() == MANUAL)
+            {
+                warming = 0;
+                PIDOutput = 0;
+                tempPID.SetMode(AUTOMATIC);
+                windowStartTime = millis();
+            }
+        }
     }
-    //Set up the PID
 
-   
+
     tempPID.SetTunings(Kp,Ki,Kd);
 
     lcd.setCursor(0,0);
@@ -481,14 +494,13 @@ void Run()
     {
         //If warm up is on and we're above the setpoint - delta, then turn the
         //PID on
-        if ((warming == 1) && (currentTemp > (tempSet - warmUpDelta)))
+        if ((warming) && (currentTemp >= (tempSet - warmUpDelta)))
         {
             warming = 0;
-
-            //Disable the PID
+            PIDOutput = 0;
             tempPID.SetMode(AUTOMATIC);
             windowStartTime = millis();
-            
+
         }
 
         doControl();
